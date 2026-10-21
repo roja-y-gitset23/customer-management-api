@@ -1,42 +1,36 @@
-import hashlib
-import hmac
-import json
+from tests.conftest import sign
 
-import pytest
-from fastapi.testclient import TestClient
-
-from src.main import app
-
-client = TestClient(app)
 URL = "/webhooks/customer-events"
-SECRET = "test-secret"
+JSON_HEADER = {"Content-Type": "application/json"}
 
 
-@pytest.fixture(autouse=True)
-def set_secret(monkeypatch):
-    monkeypatch.setenv("WEBHOOK_SECRET", SECRET)
-
-
-def sign(body: bytes) -> str:
-    return hmac.new(SECRET.encode(), body, hashlib.sha256).hexdigest()
-
-
-BODY = json.dumps({"event": "customer.created", "customer_id": 1}).encode()
-
-
-def test_valid_signature():
-    r = client.post(URL, content=BODY, headers={"X-Signature": sign(BODY)})
+def test_webhook_valid_signature_200(client, signed_webhook):
+    body, sig = signed_webhook
+    r = client.post(URL, content=body, headers={**JSON_HEADER, "X-Signature": sig})
     assert r.status_code == 200
     assert r.json() == {"status": "accepted"}
 
 
-def test_tampered_payload():
-    tampered = json.dumps({"event": "customer.created", "customer_id": 999}).encode()
-    r = client.post(URL, content=tampered, headers={"X-Signature": sign(BODY)})
+def test_webhook_tampered_payload_401(client, signed_webhook):
+    body, sig = signed_webhook
+    tampered = body.replace(b'"customer_id": 1', b'"customer_id": 999')
+    r = client.post(URL, content=tampered, headers={**JSON_HEADER, "X-Signature": sig})
     assert r.status_code == 401
-    assert r.json() == {"detail": "Invalid signature"}
 
 
-def test_missing_signature():
-    r = client.post(URL, content=BODY)
+def test_webhook_wrong_signature_401(client, signed_webhook):
+    body, _ = signed_webhook
+    r = client.post(URL, content=body, headers={**JSON_HEADER, "X-Signature": "deadbeef"})
     assert r.status_code == 401
+
+
+def test_webhook_missing_signature_401(client, signed_webhook):
+    body, _ = signed_webhook
+    r = client.post(URL, content=body, headers=JSON_HEADER)
+    assert r.status_code == 401
+
+
+def test_webhook_invalid_json_400(client):
+    body = b"not json"
+    r = client.post(URL, content=body, headers={**JSON_HEADER, "X-Signature": sign(body)})
+    assert r.status_code == 400
